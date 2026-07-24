@@ -2432,10 +2432,8 @@ const iceServers = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }, 
         { urls: 'stun:stun1.l.google.com:19302' },
-        // CRITICAL FOR MOBILE: TURN Servers pierce through strict 4G/5G Carrier Firewalls
-        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun.cloudflare.com:3478' }
     ] 
 };
 
@@ -2455,9 +2453,8 @@ window.saveStreamToArchives = async function(blob) {
     r.readAsDataURL(blob);
 };
 
-window.currentFacingMode = 'environment'; // Default to rear camera for site use
+window.currentFacingMode = 'environment';
 
-// Helper function to detect mobile devices
 window.isMobileDevice = function() {
     return (typeof window.orientation !== "undefined") || (navigator.userAgent.indexOf('IEMobile') !== -1) || /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
 };
@@ -2466,59 +2463,45 @@ window.startBroadcasting = async function() {
     const name = document.getElementById('stream-name-input').value.trim() || `Stream - ${window.globalProfile.name}`;
     if (!currentUser || !db) return window.showCustomAlert("Offline", "Cloud connection required to start a live stream.");
     
-    // STRICT SECURITY CHECK - ALLOW ALL DEVICES
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        return window.showCustomAlert("Security Error", "Camera access blocked. Please ensure you are using HTTPS. Mobile devices block cameras on insecure connections.");
+        return window.showCustomAlert("Security Error", "Camera access blocked. Please ensure you are using HTTPS.");
     }
 
     try {
-        // Prepare video UI BEFORE streaming starts to bypass iOS Safari rendering blocks
         const localVideo = document.getElementById('main-video-player');
         localVideo.classList.remove('hidden');
         document.getElementById('video-placeholder').classList.add('hidden');
         
-        // ADVANCED CAMERA CONSTRAINTS: Smart fallback to prevent mobile/laptop crashes
         const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: { ideal: window.currentFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } } 
+            ? { facingMode: window.currentFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } } 
             : { width: { ideal: 1280 }, height: { ideal: 720 } };
 
-        // Request stream with explicit high-quality audio processing
         window.localStream = await navigator.mediaDevices.getUserMedia({ 
             video: videoConstraints, 
             audio: { echoCancellation: true, noiseSuppression: true } 
         });
         
-        // Setup Video Recording with iOS Safari safeguards
         if (typeof MediaRecorder !== 'undefined') {
             window.recordedChunks = [];
-            try {
-                window.mediaRecorder = new MediaRecorder(window.localStream, { mimeType: 'video/webm; codecs=vp8,opus' });
-            } catch(e) {
-                try { window.mediaRecorder = new MediaRecorder(window.localStream, { mimeType: 'video/mp4' }); }
-                catch(e2) { window.mediaRecorder = new MediaRecorder(window.localStream); }
-            }
+            try { window.mediaRecorder = new MediaRecorder(window.localStream, { mimeType: 'video/webm; codecs=vp8,opus' }); }
+            catch(e) { window.mediaRecorder = new MediaRecorder(window.localStream); }
             window.mediaRecorder.ondataavailable = (e) => { if(e.data.size > 0) window.recordedChunks.push(e.data); };
             window.mediaRecorder.start();
         }
 
         localVideo.srcObject = window.localStream;
-        localVideo.muted = true; // Must be muted to bypass mobile autoplay blocks
+        localVideo.muted = true;
         
         const liveBadge = document.getElementById('stream-live-badge');
-        if (liveBadge) liveBadge.classList.remove('hidden');
-        
-        // Ensure play promise is handled correctly for iOS
-        const playPromise = localVideo.play();
-        if (playPromise !== undefined) {
-            playPromise.catch(error => { console.error("Video playback prevented:", error); });
+        if (liveBadge) {
+            liveBadge.classList.remove('hidden');
+            liveBadge.innerHTML = `<div class="w-2 h-2 bg-white rounded-full animate-pulse"></div> Live`;
         }
         
-        // SAFELY TOGGLE BUTTONS
-        const btnStart = document.getElementById('btn-start-stream');
-        if (btnStart) btnStart.classList.add('hidden');
+        setTimeout(() => localVideo.play().catch(e => console.warn(e)), 300);
         
-        const activeControls = document.getElementById('stream-active-controls');
-        if (activeControls) activeControls.classList.remove('hidden');
+        document.getElementById('btn-start-stream').classList.add('hidden');
+        document.getElementById('stream-active-controls').classList.remove('hidden');
         
         const accessCode = Math.random().toString(36).substr(2, 6).toUpperCase();
         window.currentRoomId = Math.random().toString(36).substr(2, 9);
@@ -2533,16 +2516,14 @@ window.startBroadcasting = async function() {
         const roomWithOffer = { offer: { type: offer.type, sdp: offer.sdp }, name: name, host: window.globalProfile.name, timestamp: Date.now(), accessCode: accessCode, callerCandidates: [], calleeCandidates: [] };
         await setDoc(roomRef, roomWithOffer);
         
-        const accessContainer = document.getElementById('stream-access-code-container');
-        if (accessContainer) accessContainer.classList.remove('hidden');
-        
-        const accessVal = document.getElementById('stream-access-code-val');
-        if (accessVal) accessVal.innerText = accessCode;
+        document.getElementById('stream-access-code-container').classList.remove('hidden');
+        document.getElementById('stream-access-code-val').innerText = accessCode;
         
         window.peerConnection.addEventListener('icecandidate', event => {
             if (event.candidate) {
-                // Throttle rapid updates to prevent Firebase overwrite races
-                updateDoc(roomRef, { callerCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+                // Strict manual serialization prevents Firebase crashing on weird mobile candidate objects
+                const safeCand = { candidate: event.candidate.candidate, sdpMid: event.candidate.sdpMid, sdpMLineIndex: event.candidate.sdpMLineIndex };
+                updateDoc(roomRef, { callerCandidates: arrayUnion(safeCand) }).catch(e=>{});
             }
         });
         
@@ -2581,59 +2562,41 @@ window.startBroadcasting = async function() {
         });
 
     } catch (e) {
-        window.showCustomAlert("Camera Error", `Camera access failed: ${e.message}. Ensure permissions are granted and you are using HTTPS.`);
+        window.showCustomAlert("Camera Error", `Camera access failed: ${e.message}. Ensure permissions are granted.`);
     }
 }
 
 window.flipCamera = async function() {
     if (!window.localStream) return;
-    
-    // Toggle the mode
     window.currentFacingMode = window.currentFacingMode === 'environment' ? 'user' : 'environment';
-    
-    // Stop all current tracks to free up the camera
     window.localStream.getTracks().forEach(track => track.stop());
     
     try {
-        // SAFE CONSTRAINT
-        const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: { ideal: window.currentFacingMode } } 
-            : true;
-
-        // Request the new camera
-        const newStream = await navigator.mediaDevices.getUserMedia({
-            video: videoConstraints,
-            audio: { echoCancellation: true, noiseSuppression: true }
-        });
+        const videoConstraints = window.isMobileDevice() ? { facingMode: window.currentFacingMode, width: { ideal: 1280 } } : true;
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: { echoCancellation: true, noiseSuppression: true } });
         
         window.localStream = newStream;
         const localVideo = document.getElementById('main-video-player');
         localVideo.srcObject = newStream;
-        localVideo.play().catch(e => e); // Ensure it keeps playing
+        localVideo.play().catch(e => e); 
         
-        // Dynamically replace the video & audio track in the active WebRTC connection without dropping the call
         if (window.peerConnection) {
             const videoTrack = newStream.getVideoTracks()[0];
             const audioTrack = newStream.getAudioTracks()[0];
             const senders = window.peerConnection.getSenders();
             
             const videoSender = senders.find(sender => sender.track && sender.track.kind === 'video');
-            if (videoSender && videoTrack) {
-                videoSender.replaceTrack(videoTrack);
-            }
+            if (videoSender && videoTrack) videoSender.replaceTrack(videoTrack);
             
             const audioSender = senders.find(sender => sender.track && sender.track.kind === 'audio');
-            if (audioSender && audioTrack) {
-                audioSender.replaceTrack(audioTrack);
-            }
+            if (audioSender && audioTrack) audioSender.replaceTrack(audioTrack);
         }
     } catch(e) {
-        window.showCustomAlert("Flip Error", "Could not switch camera. Your device might only have one camera active.");
+        window.showCustomAlert("Flip Error", "Could not switch camera.");
     }
 }
 
 window.stopBroadcasting = async function() {
-    // Stop recording and prompt for save
     if(window.mediaRecorder && window.mediaRecorder.state !== 'inactive') {
         window.mediaRecorder.onstop = async () => {
             const blob = new Blob(window.recordedChunks, { type: 'video/webm' });
@@ -2649,26 +2612,13 @@ window.stopBroadcasting = async function() {
     if (window.streamIceUnsubscribe) window.streamIceUnsubscribe();
     
     const localVideo = document.getElementById('main-video-player');
-    if (localVideo) {
-        localVideo.classList.add('hidden');
-        localVideo.srcObject = null;
-    }
+    if (localVideo) { localVideo.classList.add('hidden'); localVideo.srcObject = null; }
     
-    const placeholder = document.getElementById('video-placeholder');
-    if (placeholder) placeholder.classList.remove('hidden');
-    
-    const liveBadge = document.getElementById('stream-live-badge');
-    if (liveBadge) liveBadge.classList.add('hidden');
-    
-    // SAFELY RESET BUTTONS
-    const btnStart = document.getElementById('btn-start-stream');
-    if (btnStart) btnStart.classList.remove('hidden');
-    
-    const activeControls = document.getElementById('stream-active-controls');
-    if (activeControls) activeControls.classList.add('hidden');
-    
-    const accessContainer = document.getElementById('stream-access-code-container');
-    if (accessContainer) accessContainer.classList.add('hidden');
+    document.getElementById('video-placeholder').classList.remove('hidden');
+    document.getElementById('stream-live-badge').classList.add('hidden');
+    document.getElementById('btn-start-stream').classList.remove('hidden');
+    document.getElementById('stream-active-controls').classList.add('hidden');
+    document.getElementById('stream-access-code-container').classList.add('hidden');
     
     if (window.currentRoomId && db) {
         try { await deleteDoc(doc(db, 'artifacts', appFirebaseId, 'public', 'data', 'streams', window.currentRoomId)); } catch(e){}
@@ -2742,21 +2692,20 @@ window.joinStream = async function(roomId) {
         const enteredCode = await window.showCustomPrompt("Secured Stream", "Please enter the 6-character Access Code to join this live feed.");
         if (enteredCode === null) return; 
         if (enteredCode.trim().toUpperCase() !== realCode) {
-            return window.showCustomAlert("Access Denied", "Incorrect Access Code. Please check with the broadcaster.");
+            return window.showCustomAlert("Access Denied", "Incorrect Access Code.");
         }
     }
     
-    window.showCustomAlert("Connecting", "Code verified! Negotiating STUN/TURN connection...");
-    
-    // UNHIDE UI BEFORE CONNECTION TO PREVENT IOS PAUSING
     window.closeCustomModal();
     const remoteVideo = document.getElementById('main-video-player');
     remoteVideo.classList.remove('hidden');
     document.getElementById('video-placeholder').classList.add('hidden');
     document.getElementById('btn-disconnect-viewer').classList.remove('hidden');
-    document.getElementById('stream-live-badge').classList.remove('hidden');
     
-    // Show Audio Toggle
+    const badge = document.getElementById('stream-live-badge');
+    badge.classList.remove('hidden');
+    badge.innerHTML = `<div class="w-2 h-2 bg-yellow-300 rounded-full animate-pulse"></div> Connecting...`;
+    
     const audioBtn = document.getElementById('btn-audio-toggle');
     if (audioBtn) {
         audioBtn.classList.remove('hidden');
@@ -2766,35 +2715,36 @@ window.joinStream = async function(roomId) {
     }
     
     window.peerConnection = new RTCPeerConnection(iceServers);
-    remoteVideo.muted = true; // MUST start muted for browser autoplay policies
+    remoteVideo.muted = true; 
     
     window.peerConnection.addEventListener('connectionstatechange', event => {
-        if (window.peerConnection.connectionState === 'failed') {
-            window.showCustomAlert("Network Blocked", "The mobile network firewall blocked the connection. Try switching from Cellular to Wi-Fi.");
+        if (window.peerConnection.connectionState === 'connected') {
+            badge.innerHTML = `<div class="w-2 h-2 bg-white rounded-full animate-pulse"></div> Connected`;
+        } else if (window.peerConnection.connectionState === 'failed') {
+            badge.innerHTML = `<div class="w-2 h-2 bg-rose-600 rounded-full"></div> Failed`;
+            window.showCustomAlert("Network Blocked", "The mobile network firewall blocked the connection. Try switching networks.");
             window.disconnectViewer();
         }
     });
 
     window.peerConnection.addEventListener('track', event => {
-        let stream = event.streams[0];
-        if (!stream) {
+        if (event.streams && event.streams[0]) {
+            remoteVideo.srcObject = event.streams[0];
+        } else {
             if (!window.remoteStream) window.remoteStream = new MediaStream();
             window.remoteStream.addTrack(event.track);
-            stream = window.remoteStream;
+            remoteVideo.srcObject = window.remoteStream;
         }
         
-        if (remoteVideo.srcObject !== stream) {
-            remoteVideo.srcObject = stream;
-        }
-
-        remoteVideo.play().catch(err => {
-            console.warn("Autoplay blocked. User interaction required.", err);
-        });
+        // Defensively ensure playback kicks in
+        setTimeout(() => remoteVideo.play().catch(e => console.warn("Autoplay blocked", e)), 500);
     });
     
     window.peerConnection.addEventListener('icecandidate', event => {
         if (event.candidate) {
-            updateDoc(roomRef, { calleeCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+            // Strict manual serialization
+            const safeCand = { candidate: event.candidate.candidate, sdpMid: event.candidate.sdpMid, sdpMLineIndex: event.candidate.sdpMLineIndex };
+            updateDoc(roomRef, { calleeCandidates: arrayUnion(safeCand) }).catch(e=>{});
         }
     });
     
