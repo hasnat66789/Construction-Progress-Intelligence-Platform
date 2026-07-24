@@ -2428,7 +2428,16 @@ window.runReportComparison = async function() {
 }
 
 // --- LIVE STREAM WEBRTC FEATURE ---
-const iceServers = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' }, { urls: 'stun:stun2.l.google.com:19302' }, { urls: 'stun:stun3.l.google.com:19302' }] };
+const iceServers = { 
+    iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' }, 
+        { urls: 'stun:stun1.l.google.com:19302' },
+        // CRITICAL FOR MOBILE: TURN Servers pierce through strict 4G/5G Carrier Firewalls
+        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' },
+        { urls: 'turn:openrelay.metered.ca:443?transport=tcp', username: 'openrelayproject', credential: 'openrelayproject' }
+    ] 
+};
 
 window.saveStreamToArchives = async function(blob) {
     if(!db || !currentUser) return;
@@ -2463,10 +2472,15 @@ window.startBroadcasting = async function() {
     }
 
     try {
+        // Prepare video UI BEFORE streaming starts to bypass iOS Safari rendering blocks
+        const localVideo = document.getElementById('main-video-player');
+        localVideo.classList.remove('hidden');
+        document.getElementById('video-placeholder').classList.add('hidden');
+        
         // ADVANCED CAMERA CONSTRAINTS: Smart fallback to prevent mobile/laptop crashes
         const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: { ideal: window.currentFacingMode } } 
-            : true;
+            ? { facingMode: { ideal: window.currentFacingMode }, width: { ideal: 1280 }, height: { ideal: 720 } } 
+            : { width: { ideal: 1280 }, height: { ideal: 720 } };
 
         // Request stream with explicit high-quality audio processing
         window.localStream = await navigator.mediaDevices.getUserMedia({ 
@@ -2487,13 +2501,8 @@ window.startBroadcasting = async function() {
             window.mediaRecorder.start();
         }
 
-        const localVideo = document.getElementById('main-video-player');
         localVideo.srcObject = window.localStream;
         localVideo.muted = true; // Must be muted to bypass mobile autoplay blocks
-        localVideo.classList.remove('hidden');
-        
-        const placeholder = document.getElementById('video-placeholder');
-        if (placeholder) placeholder.classList.add('hidden');
         
         const liveBadge = document.getElementById('stream-live-badge');
         if (liveBadge) liveBadge.classList.remove('hidden');
@@ -2531,7 +2540,10 @@ window.startBroadcasting = async function() {
         if (accessVal) accessVal.innerText = accessCode;
         
         window.peerConnection.addEventListener('icecandidate', event => {
-            if (event.candidate) updateDoc(roomRef, { callerCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+            if (event.candidate) {
+                // Throttle rapid updates to prevent Firebase overwrite races
+                updateDoc(roomRef, { callerCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+            }
         });
         
         window.processedCalleeCands = new Set();
@@ -2549,7 +2561,7 @@ window.startBroadcasting = async function() {
             if (data.calleeCandidates && data.calleeCandidates.length > 0) {
                 for (const cand of data.calleeCandidates) {
                     const candStr = cand.candidate; 
-                    if (!window.processedCalleeCands.has(candStr)) {
+                    if (candStr && !window.processedCalleeCands.has(candStr)) {
                         window.processedCalleeCands.add(candStr);
                         if (window.peerConnection.remoteDescription) {
                             await window.peerConnection.addIceCandidate(new RTCIceCandidate(cand)).catch(e=>{});
@@ -2671,10 +2683,10 @@ window.toggleStreamAudio = function() {
     const txt = document.getElementById('audio-text');
     if (vid.muted) {
         icon.setAttribute('data-lucide', 'volume-x');
-        txt.innerText = 'Unmute';
+        txt.innerText = 'Unmute Sound';
     } else {
         icon.setAttribute('data-lucide', 'volume-2');
-        txt.innerText = 'Mute';
+        txt.innerText = 'Mute Audio';
         vid.play().catch(e=>e); 
     }
     if(typeof lucide !== 'undefined') lucide.createIcons();
@@ -2734,17 +2746,31 @@ window.joinStream = async function(roomId) {
         }
     }
     
-    window.showCustomAlert("Connecting", "Code verified! Connecting to live feed...");
+    window.showCustomAlert("Connecting", "Code verified! Negotiating STUN/TURN connection...");
+    
+    // UNHIDE UI BEFORE CONNECTION TO PREVENT IOS PAUSING
+    window.closeCustomModal();
+    const remoteVideo = document.getElementById('main-video-player');
+    remoteVideo.classList.remove('hidden');
+    document.getElementById('video-placeholder').classList.add('hidden');
+    document.getElementById('btn-disconnect-viewer').classList.remove('hidden');
+    document.getElementById('stream-live-badge').classList.remove('hidden');
+    
+    // Show Audio Toggle
+    const audioBtn = document.getElementById('btn-audio-toggle');
+    if (audioBtn) {
+        audioBtn.classList.remove('hidden');
+        document.getElementById('audio-icon').setAttribute('data-lucide', 'volume-x');
+        document.getElementById('audio-text').innerText = 'Unmute Sound';
+        if(typeof lucide !== 'undefined') lucide.createIcons();
+    }
     
     window.peerConnection = new RTCPeerConnection(iceServers);
-    const remoteVideo = document.getElementById('main-video-player');
-    
-    // Ensure we start muted so browsers allow playback immediately without blocking
-    remoteVideo.muted = true;
+    remoteVideo.muted = true; // MUST start muted for browser autoplay policies
     
     window.peerConnection.addEventListener('connectionstatechange', event => {
         if (window.peerConnection.connectionState === 'failed') {
-            window.showCustomAlert("Connection Blocked", "Your network firewall blocked the stream. Try switching networks (e.g., WiFi to Cellular).");
+            window.showCustomAlert("Network Blocked", "The mobile network firewall blocked the connection. Try switching from Cellular to Wi-Fi.");
             window.disconnectViewer();
         }
     });
@@ -2762,12 +2788,14 @@ window.joinStream = async function(roomId) {
         }
 
         remoteVideo.play().catch(err => {
-            console.warn("Autoplay blocked. Retrying...", err);
+            console.warn("Autoplay blocked. User interaction required.", err);
         });
     });
     
     window.peerConnection.addEventListener('icecandidate', event => {
-        if (event.candidate) updateDoc(roomRef, { calleeCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+        if (event.candidate) {
+            updateDoc(roomRef, { calleeCandidates: arrayUnion(event.candidate.toJSON()) }).catch(e=>{});
+        }
     });
     
     const offer = roomSnap.data().offer;
@@ -2787,7 +2815,7 @@ window.joinStream = async function(roomId) {
         if (data.callerCandidates && data.callerCandidates.length > 0) {
             for (const cand of data.callerCandidates) {
                 const candStr = cand.candidate; 
-                if (!window.processedCallerCands.has(candStr)) {
+                if (candStr && !window.processedCallerCands.has(candStr)) {
                     window.processedCallerCands.add(candStr);
                     if (window.peerConnection.remoteDescription) {
                         await window.peerConnection.addIceCandidate(new RTCIceCandidate(cand)).catch(e=>{});
@@ -2805,21 +2833,6 @@ window.joinStream = async function(roomId) {
             window.queuedCaller = [];
         }
     });
-    
-    window.closeCustomModal();
-    remoteVideo.classList.remove('hidden');
-    document.getElementById('video-placeholder').classList.add('hidden');
-    document.getElementById('btn-disconnect-viewer').classList.remove('hidden');
-    document.getElementById('stream-live-badge').classList.remove('hidden');
-    
-    // Show Audio Toggle
-    const audioBtn = document.getElementById('btn-audio-toggle');
-    if (audioBtn) {
-        audioBtn.classList.remove('hidden');
-        document.getElementById('audio-icon').setAttribute('data-lucide', 'volume-x');
-        document.getElementById('audio-text').innerText = 'Unmute';
-        if(typeof lucide !== 'undefined') lucide.createIcons();
-    }
 }
 
 window.disconnectViewer = function() {
