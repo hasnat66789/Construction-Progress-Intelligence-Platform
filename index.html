@@ -2432,10 +2432,9 @@ const iceServers = {
     iceServers: [
         { urls: 'stun:stun.l.google.com:19302' }, 
         { urls: 'stun:stun1.l.google.com:19302' },
-        { urls: 'stun:stun.cloudflare.com:3478' },
-        // Added TURN Servers to bypass Mobile 4G/5G Carrier Firewalls
-        { urls: 'turn:openrelay.metered.ca:80', username: 'openrelayproject', credential: 'openrelayproject' },
-        { urls: 'turn:openrelay.metered.ca:443', username: 'openrelayproject', credential: 'openrelayproject' }
+        { urls: 'stun:stun2.l.google.com:19302' },
+        { urls: 'stun:stun3.l.google.com:19302' },
+        { urls: 'stun:stun4.l.google.com:19302' }
     ] 
 };
 
@@ -2474,9 +2473,9 @@ window.startBroadcasting = async function() {
         localVideo.classList.remove('hidden');
         document.getElementById('video-placeholder').classList.add('hidden');
         
-        // Mobile uses native constraints but with ideal sizing to prevent 4G bandwidth overload (black screen). 
+        // Removed strict max constraints which cause mobile encoders to fail
         const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: window.currentFacingMode, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 } } 
+            ? { facingMode: window.currentFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } } 
             : { width: { ideal: 1280 }, height: { ideal: 720 } };
 
         window.localStream = await navigator.mediaDevices.getUserMedia({ 
@@ -2575,7 +2574,7 @@ window.flipCamera = async function() {
     
     try {
         const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: window.currentFacingMode, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 } } 
+            ? { facingMode: window.currentFacingMode, width: { ideal: 1280 }, height: { ideal: 720 } } 
             : { width: { ideal: 1280 } };
         const newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
         
@@ -2721,27 +2720,28 @@ window.joinStream = async function(roomId) {
     window.peerConnection = new RTCPeerConnection(iceServers);
     remoteVideo.muted = true; 
     
-    // CRITICAL FIX FOR BLACK SCREEN: Explicitly force transceivers so mobile firewalls open the stream
-    try {
-        window.peerConnection.addTransceiver('video', { direction: 'recvonly' });
-        window.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
-    } catch(e) { console.warn("Transceivers not supported", e); }
+    // Status Tracker so you aren't stuck on "Connecting" forever
+    let connTimeout = setTimeout(() => {
+        if(window.peerConnection && window.peerConnection.connectionState !== 'connected') {
+            window.showCustomAlert("Connection Timeout", "Failed to connect to the broadcast. The mobile network may be blocking P2P traffic.");
+            window.disconnectViewer();
+        }
+    }, 15000);
     
     window.peerConnection.addEventListener('connectionstatechange', event => {
         if (window.peerConnection.connectionState === 'connected') {
+            clearTimeout(connTimeout);
             badge.innerHTML = `<div class="w-2 h-2 bg-white rounded-full animate-pulse"></div> Connected`;
         } else if (window.peerConnection.connectionState === 'failed') {
+            clearTimeout(connTimeout);
             badge.innerHTML = `<div class="w-2 h-2 bg-rose-600 rounded-full"></div> Failed`;
-            window.showCustomAlert("Network Blocked", "The mobile network firewall blocked the connection. Try switching networks.");
             window.disconnectViewer();
         }
     });
 
     window.peerConnection.addEventListener('track', event => {
         if (event.streams && event.streams[0]) {
-            if (remoteVideo.srcObject !== event.streams[0]) {
-                remoteVideo.srcObject = event.streams[0];
-            }
+            remoteVideo.srcObject = event.streams[0];
         } else {
             if (!window.remoteStream) window.remoteStream = new MediaStream();
             if (!window.remoteStream.getTracks().includes(event.track)) {
@@ -2750,7 +2750,6 @@ window.joinStream = async function(roomId) {
             remoteVideo.srcObject = window.remoteStream;
         }
         
-        // Critical fix for laptops fetching mobile streams: Force playback when metadata loads
         remoteVideo.onloadedmetadata = () => {
             remoteVideo.play().catch(e => console.warn("Autoplay blocked", e));
         };
@@ -2764,6 +2763,7 @@ window.joinStream = async function(roomId) {
         }
     });
     
+    // Safely set descriptions without manual transceivers breaking the mapping
     const offer = roomSnap.data().offer;
     await window.peerConnection.setRemoteDescription(new RTCSessionDescription(offer));
     const answer = await window.peerConnection.createAnswer();
@@ -2806,8 +2806,12 @@ window.disconnectViewer = function() {
     window.peerConnection = null;
     if (window.streamIceUnsubscribe) window.streamIceUnsubscribe();
     
-    document.getElementById('main-video-player').classList.add('hidden');
-    document.getElementById('main-video-player').srcObject = null;
+    const remoteVideo = document.getElementById('main-video-player');
+    if(remoteVideo) {
+        remoteVideo.classList.add('hidden');
+        remoteVideo.srcObject = null;
+    }
+    
     document.getElementById('video-placeholder').classList.remove('hidden');
     document.getElementById('btn-disconnect-viewer').classList.add('hidden');
     document.getElementById('stream-live-badge').classList.add('hidden');
