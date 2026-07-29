@@ -2474,14 +2474,14 @@ window.startBroadcasting = async function() {
         localVideo.classList.remove('hidden');
         document.getElementById('video-placeholder').classList.add('hidden');
         
-        // Mobile uses native constraints to prevent decoder crash. Laptop uses strict HD.
+        // Mobile uses native constraints but with ideal sizing to prevent 4G bandwidth overload (black screen). 
         const videoConstraints = window.isMobileDevice() 
-            ? { facingMode: window.currentFacingMode } 
+            ? { facingMode: window.currentFacingMode, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 } } 
             : { width: { ideal: 1280 }, height: { ideal: 720 } };
 
         window.localStream = await navigator.mediaDevices.getUserMedia({ 
             video: videoConstraints, 
-            audio: { echoCancellation: true, noiseSuppression: true } 
+            audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } 
         });
         
         if (typeof MediaRecorder !== 'undefined') {
@@ -2574,8 +2574,10 @@ window.flipCamera = async function() {
     window.localStream.getTracks().forEach(track => track.stop());
     
     try {
-        const videoConstraints = window.isMobileDevice() ? { facingMode: window.currentFacingMode } : { width: { ideal: 1280 } };
-        const newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: { echoCancellation: true, noiseSuppression: true } });
+        const videoConstraints = window.isMobileDevice() 
+            ? { facingMode: window.currentFacingMode, width: { ideal: 1280, max: 1920 }, height: { ideal: 720, max: 1080 } } 
+            : { width: { ideal: 1280 } };
+        const newStream = await navigator.mediaDevices.getUserMedia({ video: videoConstraints, audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
         
         window.localStream = newStream;
         const localVideo = document.getElementById('main-video-player');
@@ -2719,6 +2721,12 @@ window.joinStream = async function(roomId) {
     window.peerConnection = new RTCPeerConnection(iceServers);
     remoteVideo.muted = true; 
     
+    // CRITICAL FIX FOR BLACK SCREEN: Explicitly force transceivers so mobile firewalls open the stream
+    try {
+        window.peerConnection.addTransceiver('video', { direction: 'recvonly' });
+        window.peerConnection.addTransceiver('audio', { direction: 'recvonly' });
+    } catch(e) { console.warn("Transceivers not supported", e); }
+    
     window.peerConnection.addEventListener('connectionstatechange', event => {
         if (window.peerConnection.connectionState === 'connected') {
             badge.innerHTML = `<div class="w-2 h-2 bg-white rounded-full animate-pulse"></div> Connected`;
@@ -2731,10 +2739,14 @@ window.joinStream = async function(roomId) {
 
     window.peerConnection.addEventListener('track', event => {
         if (event.streams && event.streams[0]) {
-            remoteVideo.srcObject = event.streams[0];
+            if (remoteVideo.srcObject !== event.streams[0]) {
+                remoteVideo.srcObject = event.streams[0];
+            }
         } else {
             if (!window.remoteStream) window.remoteStream = new MediaStream();
-            window.remoteStream.addTrack(event.track);
+            if (!window.remoteStream.getTracks().includes(event.track)) {
+                window.remoteStream.addTrack(event.track);
+            }
             remoteVideo.srcObject = window.remoteStream;
         }
         
@@ -2742,6 +2754,7 @@ window.joinStream = async function(roomId) {
         remoteVideo.onloadedmetadata = () => {
             remoteVideo.play().catch(e => console.warn("Autoplay blocked", e));
         };
+        remoteVideo.play().catch(e => console.warn("Immediate play blocked", e));
     });
     
     window.peerConnection.addEventListener('icecandidate', event => {
